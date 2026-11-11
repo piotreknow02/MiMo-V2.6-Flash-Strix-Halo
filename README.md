@@ -30,7 +30,7 @@ The ~107 GB checkpoint is **not** baked into the image; it is bind-mounted read-
 - Current user in the **`render`** (and ideally `video`) group — check with `id -nG`
 - **~140 GB free disk**: ~107 GB weights + ~30 GB image + caches
 - **128 GB unified RAM** (the default `-c 262144` (256K context) leaves ~21 GB free with the vision tower loaded)
-- `curl`, `python3`, and `huggingface-cli` (from `pip install huggingface_hub[cli]`) or `huggingface_hub` Python package on the host for the first-model download
+- `curl`, `python3`, and `hf` (from `pip install huggingface_hub[cli]`; older releases call it `huggingface-cli`) or the `huggingface_hub` Python package on the host for the first-model download
 
 No root/sudo is required for the normal path. Podman runs rootless; GPU access comes from `--group-add keep-groups` (carries your host `render` group into the container) plus SELinux `:z` bind relabeling.
 
@@ -44,7 +44,7 @@ cp .env.sample .env      # optional
 First run:
 
 1. Clones and builds the Kyojin engine with ROCm gfx1151 support (~10–20 min).
-2. Downloads the ~107 GB checkpoint to `./models` (resumable via `huggingface-cli` or `huggingface_hub`), then verifies every shard against the pack's `SHA256SUMS`.
+2. Downloads the ~107 GB checkpoint to `./models` (resumable via `hf` or `huggingface_hub`), then verifies every shard against the pack's `SHA256SUMS`.
 3. Starts the container and streams the engine log to `.mimo26.log`.
 4. Exits "ready" once `/health` returns 200.
 
@@ -80,6 +80,7 @@ Copy `.env.sample` to `.env` and edit. Precedence (highest first): **exported sh
 | `READY_TIMEOUT`  | `3600`                                   | Seconds to wait for the health endpoint                             |
 | `MAX_JOBS`       | `$(nproc)`                               | Kernel build parallelism (hipcc/ninja); also `podman build --jobs`  |
 | `NO_VISION`      | *(unset)*                                | Any non-empty value passes `--no-vision` (saves 1.4 GiB GPU memory; image requests get HTTP 400) |
+| `CTX_SIZE`       | `262144`                                 | Context window in tokens (256K needs ~105 GiB unified memory; lower it when other apps use RAM) |
 | `HF_TOKEN`       | *(unset)*                                | Optional HuggingFace token — higher download rate limits            |
 
 ## How it works
@@ -91,7 +92,7 @@ The `Containerfile` builds a self-contained image:
 3. Kyojin engine git-cloned from GitHub at a pinned commit.
 4. ROCm gfx1151 PyTorch + `rocm-sdk-core` + `rocm-sdk-devel` wheels installed into a uv-managed venv (self-contained, no system ROCm), then `rocm-sdk init` expands the devel headers.
 5. `build.sh` compiles the exllamav3 C++/HIP extension for gfx1151.
-6. At runtime, `env.sh` sets `LD_PRELOAD` (HSA runtime) and `PYTHONPATH`, then `serve.py` serves the model on `0.0.0.0:8000` (host port mapped by `start.sh`) under the HuggingFace repo id, with `-c 262144` (256K context). The DFlash drafter is auto-found in `<model>/drafter/` (speculation on by default, `--ndt 7 --dynamic-draft --draft-confidence 0.6`); the vision tower loads from `<model>/vision/vision.safetensors` unless `NO_VISION` is set. `$HOME/.cache` is a symlink to the `/cache` bind-mount so GEMM tuning and kernel caches survive container recreation.
+6. At runtime, `env.sh` sets `LD_PRELOAD` (HSA runtime) and `PYTHONPATH`, then `serve.py` serves the model on `0.0.0.0:8000` (host port mapped by `start.sh`) under the HuggingFace repo id, with `-c 262144` (256K context, overridable with `CTX_SIZE`). The DFlash drafter is auto-found in `<model>/drafter/` (speculation on by default, `--ndt 7 --dynamic-draft --draft-confidence 0.6`); the vision tower loads from `<model>/vision/vision.safetensors` unless `NO_VISION` is set. `$HOME/.cache` is a symlink to the `/cache` bind-mount so GEMM tuning and kernel caches survive container recreation.
 
 The image does **not** contain a system ROCm — the wheels are self-contained and the `_rocm_sdk_devel` package provides both the ROCm headers for compilation and the compatible HSA runtime for execution.
 
@@ -149,15 +150,15 @@ sudo systemctl daemon-reload
 
 **SELinux `Permission denied` on `/models`** — confirm the `:z` suffix on the bind (start.sh sets it). If you relabeled the directory manually, `restorecon -R` it or just re-run `./start.sh`.
 
-**Host OOM under load** — close other apps or reduce the context size by passing a smaller `-c` in the Containerfile's CMD. Default `-c 262144` (256K) opens ~21 GiB free on a 128 GB box (weights ~97.8 GiB + KV ~5.6 GiB + vision 1.4 GiB).
+**Host OOM under load** — close other apps or lower the context window with `CTX_SIZE` (for example `CTX_SIZE=32768 ./start.sh`, or set it in `.env`)
 
-**`huggingface-cli: command not found`** — install `huggingface_hub` on the host:
+**`hf: command not found`** — install `huggingface_hub` on the host:
 
 ```bash
 pip install huggingface_hub[cli]
 ```
 
-Or ensure `python3`'s environment has `huggingface_hub` installed. start.sh tries both `huggingface-cli` and a Python one-liner using `huggingface_hub`.
+Or ensure `python3`'s environment has `huggingface_hub` installed. start.sh tries `hf` first, then a Python one-liner using `huggingface_hub`.
 
 **SHA256SUMS verification failed** — the pack ships `SHA256SUMS`; start.sh verifies every shard after download. If it fails, re-run `./start.sh` to re-download the corrupted files.
 
